@@ -2,6 +2,7 @@ package com.example.android.camera2basic;
 
 import android.app.Activity;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.RectF;
@@ -20,15 +21,23 @@ import android.media.ImageReader;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.os.SystemClock;
 import android.util.Log;
 import android.util.Size;
 import android.util.SparseIntArray;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
+import android.widget.ImageView;
 import android.widget.Toast;
 
+import com.google.zxing.BinaryBitmap;
+import com.google.zxing.LuminanceSource;
+import com.google.zxing.ReaderException;
+import com.google.zxing.Result;
+import com.google.zxing.common.HybridBinarizer;
+import com.google.zxing.qrcode.QRCodeReader;
+
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -61,6 +70,8 @@ import static android.hardware.camera2.CaptureResult.CONTROL_AF_STATE;
 
 public class CameraActivity extends Activity implements View.OnClickListener {
 
+    private static final int sImageFormat = ImageFormat.YUV_420_888;
+
     /**
      * Conversion from screen rotation to JPEG orientation.
      */
@@ -82,7 +93,7 @@ public class CameraActivity extends Activity implements View.OnClickListener {
      * Camera state: Showing camera preview.
      */
     private static final int STATE_PREVIEW = 0;
-
+    private int mState = STATE_PREVIEW;
     /**
      * Camera state: Waiting for the focus to be locked.
      */
@@ -99,67 +110,6 @@ public class CameraActivity extends Activity implements View.OnClickListener {
      * Camera state: Picture was taken.
      */
     private static final int STATE_PICTURE_TAKEN = 4;
-
-    /**
-     * {@link TextureView.SurfaceTextureListener} handles several lifecycle events on a
-     * {@link TextureView}.
-     */
-    private final TextureView.SurfaceTextureListener mSurfaceTextureListener = new TextureView.SurfaceTextureListener() {
-
-        @Override
-        public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-            openCamera(width, height);
-        }
-
-        @Override
-        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
-            configureTransform(width, height);
-        }
-
-        @Override
-        public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
-            return true;
-        }
-
-        @Override
-        public void onSurfaceTextureUpdated(SurfaceTexture texture) {
-        }
-
-    };
-    private final CameraDevice.StateCallback mStateCallback = new CameraDevice.StateCallback() {
-
-        @Override
-        public void onOpened(CameraDevice cameraDevice) {
-            // This method is called when the camera is opened.  We start camera preview here.
-            mCameraOpenCloseLock.release();
-            mCameraDevice = cameraDevice;
-            createCameraPreviewSession();
-        }
-
-        @Override
-        public void onDisconnected(CameraDevice cameraDevice) {
-            mCameraOpenCloseLock.release();
-            cameraDevice.close();
-            mCameraDevice = null;
-        }
-
-        @Override
-        public void onError(CameraDevice cameraDevice, int error) {
-            mCameraOpenCloseLock.release();
-            cameraDevice.close();
-            mCameraDevice = null;
-            finish();
-        }
-
-    };
-    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = new ImageReader.OnImageAvailableListener() {
-
-        @Override
-        public void onImageAvailable(ImageReader reader) {
-            mBackgroundHandler.post(new ImageProcessor(reader.acquireNextImage()));
-        }
-
-    };
     private final CameraCaptureSession.CaptureCallback mCaptureCallback = new CameraCaptureSession.CaptureCallback() {
 
         private void process(CaptureResult result) {
@@ -215,19 +165,140 @@ public class CameraActivity extends Activity implements View.OnClickListener {
         }
 
     };
+    /**
+     * {@link TextureView.SurfaceTextureListener} handles several lifecycle events on a
+     * {@link TextureView}.
+     */
+    private final TextureView.SurfaceTextureListener mSurfaceTextureListener = new TextureView.SurfaceTextureListener() {
 
+        @Override
+        public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+            openCamera(width, height);
+        }
+
+        @Override
+        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
+            configureTransform(width, height);
+        }
+
+        @Override
+        public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+            return true;
+        }
+
+        @Override
+        public void onSurfaceTextureUpdated(SurfaceTexture texture) {
+        }
+
+    };
+    private QRCodeReader mQrReader;
     private String mCameraId;
     private AutoFitTextureView mTextureView;
+    private ImageView mCapturedView;
+    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = new ImageReader.OnImageAvailableListener() {
+
+        @Override
+        public void onImageAvailable(ImageReader reader) {
+            mBackgroundHandler.post(new ImageProcessor(mQrReader, reader.acquireNextImage(), mCapturedView));
+        }
+
+    };
     private CameraCaptureSession mCaptureSession;
     private CameraDevice mCameraDevice;
+    private final CameraDevice.StateCallback mStateCallback = new CameraDevice.StateCallback() {
+
+        @Override
+        public void onOpened(CameraDevice cameraDevice) {
+            // This method is called when the camera is opened.  We start camera preview here.
+            mCameraOpenCloseLock.release();
+            mCameraDevice = cameraDevice;
+            createCameraPreviewSession();
+        }
+
+        @Override
+        public void onDisconnected(CameraDevice cameraDevice) {
+            mCameraOpenCloseLock.release();
+            cameraDevice.close();
+            mCameraDevice = null;
+        }
+
+        @Override
+        public void onError(CameraDevice cameraDevice, int error) {
+            mCameraOpenCloseLock.release();
+            cameraDevice.close();
+            mCameraDevice = null;
+            finish();
+        }
+
+    };
     private Size mPreviewSize;
     private HandlerThread mBackgroundThread;
     private Handler mBackgroundHandler;
     private ImageReader mImageReader;
     private CaptureRequest.Builder mPreviewRequestBuilder;
     private CaptureRequest mPreviewRequest;
-    private int mState = STATE_PREVIEW;
     private Semaphore mCameraOpenCloseLock = new Semaphore(1);
+
+    /**
+     * Given {@code choices} of {@code Size}s supported by a camera, chooses the smallest one whose
+     * width and height are at least as large as the respective requested values, and whose aspect
+     * ratio matches with the specified value.
+     *
+     * @param choices     The list of sizes that the camera supports for the intended output class
+     * @param width       The minimum desired width
+     * @param height      The minimum desired height
+     * @param aspectRatio The aspect ratio
+     * @return The optimal {@code Size}, or an arbitrary one if none were big enough
+     */
+    private static Size chooseOptimalSize(Size[] choices, int width, int height, Size aspectRatio) {
+        // Collect the supported resolutions that are at least as big as the preview Surface
+        List<Size> bigEnough = new ArrayList<>();
+        int w = aspectRatio.getWidth();
+        int h = aspectRatio.getHeight();
+        for (Size option : choices) {
+            if (option.getHeight() == option.getWidth() * h / w &&
+                    option.getWidth() >= width && option.getHeight() >= height) {
+                bigEnough.add(option);
+            }
+        }
+
+        // Pick the smallest of those, assuming we found any
+        if (bigEnough.size() > 0) {
+            return Collections.min(bigEnough, new CompareSizesByArea());
+        } else {
+            Log.e(TAG, "Couldn't find any suitable preview size");
+            return choices[0];
+        }
+    }
+
+    public static Bitmap renderBitmap(LuminanceSource source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        byte[] data = source.getMatrix();
+
+        /*
+        if (cameraManager.isFrontFaced()) {
+            if (cameraManager.isPortraitPreview()) {
+                data = mirrorMatrixVertically(data, width, height);
+            } else {
+                data = mirrorMatrixHorizontally(data, width, height);
+            }
+        }
+        */
+
+        final int[] pixels = new int[width * height];
+
+        for (int x = 0; x < width; x++) {
+            for (int y = 0; y < height; y++) {
+                int pixel = 0xFF000000 | ((data[x * height + y] & 0xff) * 0x00010101);
+                pixels[x * height + y] = pixel;
+            }
+        }
+
+        final Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height);
+        return bitmap;
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -235,7 +306,9 @@ public class CameraActivity extends Activity implements View.OnClickListener {
 
         setContentView(R.layout.camera2_basic);
 
+        mQrReader = new QRCodeReader();
         mTextureView = (AutoFitTextureView) findViewById(R.id.texture);
+        mCapturedView = (ImageView) findViewById(R.id.captured);
 
         findViewById(R.id.picture).setOnClickListener(this);
     }
@@ -281,10 +354,10 @@ public class CameraActivity extends Activity implements View.OnClickListener {
                 StreamConfigurationMap map = characteristics.get(SCALER_STREAM_CONFIGURATION_MAP);
 
                 // For still image captures, we use the largest available size.
-                List<Size> outputSizes = Arrays.asList(map.getOutputSizes(ImageFormat.YUV_420_888));
+                List<Size> outputSizes = Arrays.asList(map.getOutputSizes(sImageFormat));
                 Size largest = Collections.max(outputSizes, new CompareSizesByArea());
 
-                mImageReader = ImageReader.newInstance(largest.getWidth(), largest.getHeight(), ImageFormat.YUV_420_888, 2);
+                mImageReader = ImageReader.newInstance(largest.getWidth(), largest.getHeight(), sImageFormat, 2);
                 mImageReader.setOnImageAvailableListener(mOnImageAvailableListener, mBackgroundHandler);
 
                 // Danger, W.R.! Attempting to use too large a preview size could exceed the camera
@@ -561,53 +634,56 @@ public class CameraActivity extends Activity implements View.OnClickListener {
         }
     }
 
-    /**
-     * Given {@code choices} of {@code Size}s supported by a camera, chooses the smallest one whose
-     * width and height are at least as large as the respective requested values, and whose aspect
-     * ratio matches with the specified value.
-     *
-     * @param choices     The list of sizes that the camera supports for the intended output class
-     * @param width       The minimum desired width
-     * @param height      The minimum desired height
-     * @param aspectRatio The aspect ratio
-     * @return The optimal {@code Size}, or an arbitrary one if none were big enough
-     */
-    private static Size chooseOptimalSize(Size[] choices, int width, int height, Size aspectRatio) {
-        // Collect the supported resolutions that are at least as big as the preview Surface
-        List<Size> bigEnough = new ArrayList<>();
-        int w = aspectRatio.getWidth();
-        int h = aspectRatio.getHeight();
-        for (Size option : choices) {
-            if (option.getHeight() == option.getWidth() * h / w &&
-                    option.getWidth() >= width && option.getHeight() >= height) {
-                bigEnough.add(option);
-            }
-        }
-
-        // Pick the smallest of those, assuming we found any
-        if (bigEnough.size() > 0) {
-            return Collections.min(bigEnough, new CompareSizesByArea());
-        } else {
-            Log.e(TAG, "Couldn't find any suitable preview size");
-            return choices[0];
-        }
-    }
-
     private static class ImageProcessor implements Runnable {
 
+        private final QRCodeReader mQrReader;
         private final Image mImage;
+        private final ImageView mTarget;
 
-        public ImageProcessor(Image image) {
+        public ImageProcessor(QRCodeReader qrReader, Image image, ImageView target) {
+            mQrReader = qrReader;
             mImage = image;
+            mTarget = target;
         }
 
         @Override
         public void run() {
+            ByteBuffer buffer = mImage.getPlanes()[0].getBuffer();
+            byte[] data = new byte[buffer.remaining()];
+            buffer.get(data);
+            int width = mImage.getWidth();
+            int height = mImage.getHeight();
+
+            Result rawResult = null;
+
+            Log.e("C2", data.length + " (" + width + "x" + height + ")");
+            PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(data, width, height);
+            BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
             try {
-                SystemClock.sleep(500);
+                rawResult = mQrReader.decode(bitmap);
+            } catch (ReaderException ignored) {
+                /* Ignored */
             } finally {
-                mImage.close();
+                mQrReader.reset();
             }
+
+            final Bitmap captured = renderBitmap(source);
+            mTarget.post(new Runnable() {
+
+                @Override
+                public void run() {
+                    mTarget.setImageBitmap(captured);
+                }
+
+            });
+
+            if (rawResult != null) {
+                Log.e("C2", "Decoding successful!");
+            } else {
+                Log.d("C2", "No QR code found…");
+            }
+
+            mImage.close();
         }
 
     }
